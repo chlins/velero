@@ -19,6 +19,9 @@ jobs:
       )
     runs-on: ubuntu-latest
     permissions:
+      # contents: write is required because updating the pull request branch
+      # pushes commits to the head branch.
+      contents: write
       pull-requests: write
     steps:
       - name: Rebase pull request
