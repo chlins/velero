@@ -181,6 +181,7 @@ func TestRestorePodVolumes(t *testing.T) {
 		pvbs            []*velerov1api.PodVolumeBackup
 		restoredPod     *corev1api.Pod
 		sourceNamespace string
+		inplace         bool
 		errs            []expectError
 	}{
 		{
@@ -340,6 +341,61 @@ func TestRestorePodVolumes(t *testing.T) {
 				completedPVR,
 			},
 		},
+		{
+			name: "in-place restore blocked when the PVC is used by another running pod",
+			pvbs: []*velerov1api.PodVolumeBackup{
+				createPVBObj(true, true, 1, "kopia"),
+			},
+			inplace: true,
+			kubeClientObj: []runtime.Object{
+				createNodeAgentDaemonset(),
+				createPVCObj(1),
+				func() *corev1api.Pod {
+					pod := builder.ForPod("fake-ns", "other-pod").
+						Volumes(builder.ForVolume("fake-volume-1").PersistentVolumeClaimSource("fake-pvc-1").Result()).
+						Result()
+					pod.Status.Phase = corev1api.PodRunning
+					return pod
+				}(),
+			},
+			ctlClientObj: []runtime.Object{
+				createBackupRepoObj(),
+			},
+			restoredPod:     createPodObj(true, true, true, 1),
+			sourceNamespace: "fake-ns",
+			bsl:             "fake-bsl",
+			runtimeScheme:   scheme,
+			errs: []expectError{
+				{
+					err:        "in-place restore pre-flight check failed",
+					prefixOnly: true,
+				},
+			},
+		},
+		{
+			name: "in-place restore proceeds when the PVC is only used by the restored pod itself",
+			pvbs: []*velerov1api.PodVolumeBackup{
+				createPVBObj(true, true, 1, "kopia"),
+			},
+			inplace: true,
+			kubeClientObj: []runtime.Object{
+				createNodeAgentDaemonset(),
+				createNodeObj(),
+				createPVCObj(1),
+				createPodObj(true, true, true, 1),
+				createNodeAgentPodObj(true),
+			},
+			ctlClientObj: []runtime.Object{
+				createBackupRepoObj(),
+			},
+			restoredPod:     createPodObj(true, true, true, 1),
+			sourceNamespace: "fake-ns",
+			bsl:             "fake-bsl",
+			runtimeScheme:   scheme,
+			retPVRs: []*velerov1api.PodVolumeRestore{
+				completedPVR,
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -362,7 +418,11 @@ func TestRestorePodVolumes(t *testing.T) {
 
 			ensurer := repository.NewEnsurer(fakeCRClient, velerotest.NewLogger(), time.Millisecond)
 
-			restoreObj := builder.ForRestore(velerov1api.DefaultNamespace, "fake-restore").Result()
+			restoreBuilder := builder.ForRestore(velerov1api.DefaultNamespace, "fake-restore")
+			if test.inplace {
+				restoreBuilder = restoreBuilder.ExistingVolumeDataPolicy(string(velerov1api.VolumeDataPolicyTypeFull))
+			}
+			restoreObj := restoreBuilder.Result()
 
 			rs := newRestorer(ctx, repository.NewRepoLocker(), ensurer, pvrInformer, kubeClient, fakeCRClient, restoreObj, velerotest.NewLogger())
 

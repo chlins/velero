@@ -38,6 +38,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/nodeagent"
 	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/restore/inplace"
 	uploaderutil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -176,6 +177,15 @@ func (r *restorer) RestorePodVolumes(data RestoreData, tracker *volume.RestoreVo
 					errs = append(errs, errors.Wrap(err, "error getting persistent volume claim for volume"))
 					continue
 				}
+			}
+		}
+
+		// Pre-flight checks for in-place restore. The restored pod itself is
+		// excluded since its injected init container performs the data transfer.
+		if data.Restore.IsVolumeDataInplaceRestore() && pvc != nil {
+			if err := inplace.CheckPVCNotInUse(r.ctx, r.crClient, pvc, data.Pod.Name); err != nil {
+				errs = append(errs, err)
+				continue
 			}
 		}
 

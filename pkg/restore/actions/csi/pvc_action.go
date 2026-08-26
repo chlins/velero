@@ -44,6 +44,7 @@ import (
 	plugincommon "github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	riav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/restoreitemaction/v2"
+	"github.com/vmware-tanzu/velero/pkg/restore/inplace"
 	uploaderUtil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
@@ -207,6 +208,11 @@ func (p *pvcRestoreItemAction) executeWithDataMove(logger *logrus.Entry, input *
 			return &velero.RestoreItemActionExecuteOutput{
 				UpdatedItem: input.Item,
 			}, nil
+		}
+
+		// Pre-flight checks must pass before any side effect on the existing PVC/PV.
+		if err := inplace.CheckPVCNotInUse(context.Background(), p.crClient, existingPVC); err != nil {
+			return nil, errors.WithStack(err)
 		}
 
 		// the existing PVC should be deleted here rather than in the Exposer, otherwise the target PVC cannot be restored
