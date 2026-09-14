@@ -131,24 +131,53 @@ func gatedByThisRestore(pod *corev1api.Pod, restoreUID types.UID) bool {
 	return true
 }
 
-// CheckPVCBoundToBackedUpPV verifies the existing PVC is still bound to the
-// same PV it was bound to at backup time. An in-place restore onto a
-// different volume is unsafe: an incremental (CBT) restore computes deltas
-// against a different volume lineage, and even a full restore would patch and
-// write into a volume unrelated to the backup. The PV comparison is skipped
-// when the PVC is restored into a different namespace, where it is necessarily
-// bound to a different PV (the documented cross-namespace clone-and-restore
-// workflow), and when the backed-up PV name is unknown.
-func CheckPVCBoundToBackedUpPV(existingPVC *corev1api.PersistentVolumeClaim, backedUpPVName, sourceNamespace string) error {
+// BackedUpVolume identifies the volume a PVC was bound to at backup time.
+type BackedUpVolume struct {
+	// PVName is the name of the PV the PVC was bound to.
+	PVName string
+	// VolumeHandle is the CSI volume handle of that PV; empty for non-CSI volumes.
+	VolumeHandle string
+}
+
+// CheckPVCBoundToBackedUpVolume verifies the existing PVC is still bound to the
+// volume that was backed up. An in-place restore onto a different volume is
+// unsafe: an incremental (CBT) restore computes deltas against a different
+// volume lineage, and even a full restore would patch and write into a volume
+// unrelated to the backup.
+//
+// The volume is identified by its CSI volume handle when both sides record
+// one: Velero itself recreates the PV under a new name during a block data
+// mover restore of a file system volume, so the PV name alone is not a stable
+// identity. Non-CSI volumes fall back to the PV name. The comparison is
+// skipped when the PVC is restored into a different namespace, where it is
+// necessarily bound to a different volume (the documented cross-namespace
+// clone-and-restore workflow), and when the backed-up volume is unknown.
+func CheckPVCBoundToBackedUpVolume(existingPVC *corev1api.PersistentVolumeClaim, existingPV *corev1api.PersistentVolume, backedUp BackedUpVolume, sourceNamespace string) error {
 	if existingPVC.Status.Phase != corev1api.ClaimBound {
 		return errors.Errorf("in-place restore pre-flight check failed, skipping volume data restore: PVC %s/%s is not bound (phase %s)",
 			existingPVC.Namespace, existingPVC.Name, existingPVC.Status.Phase)
 	}
-	if existingPVC.Namespace != sourceNamespace || backedUpPVName == "" || existingPVC.Spec.VolumeName == backedUpPVName {
+	if existingPVC.Namespace != sourceNamespace || backedUp.PVName == "" {
+		return nil
+	}
+
+	var existingHandle string
+	if existingPV != nil && existingPV.Spec.CSI != nil {
+		existingHandle = existingPV.Spec.CSI.VolumeHandle
+	}
+	if backedUp.VolumeHandle != "" && existingHandle != "" {
+		if existingHandle == backedUp.VolumeHandle {
+			return nil
+		}
+		return errors.Errorf("in-place restore pre-flight check failed, skipping volume data restore: PVC %s/%s is bound to volume %s (PV %s), but was bound to volume %s (PV %s) at backup time",
+			existingPVC.Namespace, existingPVC.Name, existingHandle, existingPVC.Spec.VolumeName, backedUp.VolumeHandle, backedUp.PVName)
+	}
+
+	if existingPVC.Spec.VolumeName == backedUp.PVName {
 		return nil
 	}
 	return errors.Errorf("in-place restore pre-flight check failed, skipping volume data restore: PVC %s/%s is bound to PV %s, but was bound to PV %s at backup time",
-		existingPVC.Namespace, existingPVC.Name, existingPVC.Spec.VolumeName, backedUpPVName)
+		existingPVC.Namespace, existingPVC.Name, existingPVC.Spec.VolumeName, backedUp.PVName)
 }
 
 // CheckPVCCapacity verifies the existing PVC is large enough to hold the

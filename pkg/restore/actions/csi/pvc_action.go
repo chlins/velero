@@ -236,7 +236,18 @@ func (p *pvcRestoreItemAction) executeWithDataMove(logger *logrus.Entry, input *
 	restoreType := input.Restore.Spec.ExistingVolumeDataPolicy
 	if pvcExists {
 		// Pre-flight checks must pass before any side effect on the existing PVC/PV.
-		if err := inplace.CheckPVCBoundToBackedUpPV(existingPVC, pvcFromBackup.Spec.VolumeName, pvcFromBackup.Namespace); err != nil {
+		var boundPV *corev1api.PersistentVolume
+		if existingPVC.Spec.VolumeName != "" {
+			boundPV = new(corev1api.PersistentVolume)
+			if err := p.crClient.Get(ctx, crclient.ObjectKey{Name: existingPVC.Spec.VolumeName}, boundPV); err != nil {
+				return nil, errors.Wrapf(err, "fail to get PV %s bound to the existing PVC %s/%s", existingPVC.Spec.VolumeName, existingPVC.Namespace, existingPVC.Name)
+			}
+		}
+		backedUp := inplace.BackedUpVolume{
+			PVName:       pvcFromBackup.Spec.VolumeName,
+			VolumeHandle: pvc.Annotations[velerov1api.InplaceRestoreVolumeHandleAnnotation],
+		}
+		if err := inplace.CheckPVCBoundToBackedUpVolume(existingPVC, boundPV, backedUp, pvcFromBackup.Namespace); err != nil {
 			return nil, errors.WithStack(err)
 		}
 		if err := inplace.CheckPVCCapacity(existingPVC, sourceSizeFromCarrier(pvc)); err != nil {

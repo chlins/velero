@@ -190,7 +190,19 @@ func (r *restorer) RestorePodVolumes(data RestoreData, tracker *volume.RestoreVo
 		// restore's PodVolumeRestores complete.
 		if data.Restore.IsVolumeDataInplaceRestore() && pvc != nil {
 			pvName := backedUpPVName(data.BackupVolumeInfos, data.SourceNamespace, pvc.Name)
-			if err := inplace.CheckPVCBoundToBackedUpPV(pvc, pvName, data.SourceNamespace); err != nil {
+			backedUp := inplace.BackedUpVolume{PVName: pvName}
+			if info := data.BackupVolumeInfos[pvName].PVInfo; info != nil {
+				backedUp.VolumeHandle = info.VolumeHandle
+			}
+			var boundPV *corev1api.PersistentVolume
+			if pvc.Spec.VolumeName != "" {
+				boundPV = new(corev1api.PersistentVolume)
+				if err := r.crClient.Get(r.ctx, ctrlclient.ObjectKey{Name: pvc.Spec.VolumeName}, boundPV); err != nil {
+					errs = append(errs, errors.Wrapf(err, "error getting PV %s bound to PVC %s/%s", pvc.Spec.VolumeName, pvc.Namespace, pvc.Name))
+					continue
+				}
+			}
+			if err := inplace.CheckPVCBoundToBackedUpVolume(pvc, boundPV, backedUp, data.SourceNamespace); err != nil {
 				errs = append(errs, err)
 				continue
 			}

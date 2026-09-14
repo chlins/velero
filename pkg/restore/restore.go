@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1644,16 +1645,24 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 	// newly provisioned PVC to a stale node.
 	stripInplaceRestoreCarrierAnnotations(obj)
 
-	// Carry the source volume size from the backup volume info to the PVC CSI RIA, which has no
-	// access to the volume info, so it can run the in-place restore capacity pre-flight check.
+	// Carry backup volume info the PVC CSI RIA needs for the in-place restore pre-flight
+	// checks but has no access to: the source volume size and the backed-up volume handle.
 	if groupResource == kuberesource.PersistentVolumeClaims {
 		pvName, _, _ := unstructured.NestedString(obj.Object, "spec", "volumeName")
-		if sourceSize := ctx.backupVolumeInfoMap[pvName].SourceSize(); sourceSize > 0 {
+		volumeInfo := ctx.backupVolumeInfoMap[pvName]
+		carriers := map[string]string{}
+		if sourceSize := volumeInfo.SourceSize(); sourceSize > 0 {
+			carriers[velerov1api.InplaceRestoreSourceSizeAnnotation] = strconv.FormatInt(sourceSize, 10)
+		}
+		if volumeInfo.PVInfo != nil && volumeInfo.PVInfo.VolumeHandle != "" {
+			carriers[velerov1api.InplaceRestoreVolumeHandleAnnotation] = volumeInfo.PVInfo.VolumeHandle
+		}
+		if len(carriers) > 0 {
 			annotations := obj.GetAnnotations()
 			if annotations == nil {
 				annotations = map[string]string{}
 			}
-			annotations[velerov1api.InplaceRestoreSourceSizeAnnotation] = strconv.FormatInt(sourceSize, 10)
+			maps.Copy(annotations, carriers)
 			obj.SetAnnotations(annotations)
 		}
 	}
@@ -2526,6 +2535,7 @@ func resetMetadataAndStatus(obj *unstructured.Unstructured) (*unstructured.Unstr
 var inplaceRestoreCarrierAnnotations = []string{
 	velerov1api.InplaceRestoreSelectedNodeAnnotation,
 	velerov1api.InplaceRestoreSourceSizeAnnotation,
+	velerov1api.InplaceRestoreVolumeHandleAnnotation,
 }
 
 func stripInplaceRestoreCarrierAnnotations(obj metav1.Object) {

@@ -202,7 +202,7 @@ func TestCheckPVCNotInUse(t *testing.T) {
 	}
 }
 
-func TestCheckPVCBoundToBackedUpPV(t *testing.T) {
+func TestCheckPVCBoundToBackedUpVolume(t *testing.T) {
 	pvc := func(namespace, pvName string, phase corev1api.PersistentVolumeClaimPhase) *corev1api.PersistentVolumeClaim {
 		return &corev1api.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: "pvc-1", Namespace: namespace},
@@ -210,51 +210,93 @@ func TestCheckPVCBoundToBackedUpPV(t *testing.T) {
 			Status:     corev1api.PersistentVolumeClaimStatus{Phase: phase},
 		}
 	}
+	csiPV := func(name, handle string) *corev1api.PersistentVolume {
+		return &corev1api.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1api.PersistentVolumeSpec{PersistentVolumeSource: corev1api.PersistentVolumeSource{
+				CSI: &corev1api.CSIPersistentVolumeSource{VolumeHandle: handle},
+			}},
+		}
+	}
+	localPV := func(name string) *corev1api.PersistentVolume {
+		return &corev1api.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	}
 
 	tests := []struct {
-		name           string
-		existingPVC    *corev1api.PersistentVolumeClaim
-		backedUpPVName string
-		expectError    string
+		name        string
+		existingPVC *corev1api.PersistentVolumeClaim
+		existingPV  *corev1api.PersistentVolume
+		backedUp    BackedUpVolume
+		expectError string
 	}{
 		{
-			name:           "bound to the backed-up PV, check passes",
-			existingPVC:    pvc("default", "pv-1", corev1api.ClaimBound),
-			backedUpPVName: "pv-1",
+			name:        "same volume handle under the same PV name, check passes",
+			existingPVC: pvc("default", "pv-1", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-1", "vol-1"),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
 		},
 		{
-			name:           "bound to a different PV, check fails",
-			existingPVC:    pvc("default", "pv-other", corev1api.ClaimBound),
-			backedUpPVName: "pv-1",
-			expectError:    "is bound to PV pv-other, but was bound to PV pv-1 at backup time",
+			name:        "same volume handle under a recreated PV name, check passes",
+			existingPVC: pvc("default", "pv-recreated", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-recreated", "vol-1"),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
 		},
 		{
-			name:           "PVC not bound, check fails",
-			existingPVC:    pvc("default", "", corev1api.ClaimPending),
-			backedUpPVName: "pv-1",
-			expectError:    "is not bound (phase Pending)",
+			name:        "different volume handle under the same PV name, check fails",
+			existingPVC: pvc("default", "pv-1", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-1", "vol-other"),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
+			expectError: "is bound to volume vol-other (PV pv-1), but was bound to volume vol-1 (PV pv-1) at backup time",
 		},
 		{
-			name:           "different PV in a different namespace, check passes",
-			existingPVC:    pvc("mapped-ns", "pv-other", corev1api.ClaimBound),
-			backedUpPVName: "pv-1",
+			name:        "different volume handle and PV name, check fails",
+			existingPVC: pvc("default", "pv-other", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-other", "vol-other"),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
+			expectError: "is bound to volume vol-other (PV pv-other), but was bound to volume vol-1 (PV pv-1) at backup time",
 		},
 		{
-			name:           "backed-up PV name unknown, check passes",
-			existingPVC:    pvc("default", "pv-other", corev1api.ClaimBound),
-			backedUpPVName: "",
+			name:        "non-CSI volume with the same PV name, check passes",
+			existingPVC: pvc("default", "pv-1", corev1api.ClaimBound),
+			existingPV:  localPV("pv-1"),
+			backedUp:    BackedUpVolume{PVName: "pv-1"},
 		},
 		{
-			name:           "different namespace but PVC not bound, check still fails",
-			existingPVC:    pvc("mapped-ns", "", corev1api.ClaimLost),
-			backedUpPVName: "pv-1",
-			expectError:    "is not bound (phase Lost)",
+			name:        "non-CSI volume with a different PV name, check fails",
+			existingPVC: pvc("default", "pv-other", corev1api.ClaimBound),
+			existingPV:  localPV("pv-other"),
+			backedUp:    BackedUpVolume{PVName: "pv-1"},
+			expectError: "is bound to PV pv-other, but was bound to PV pv-1 at backup time",
+		},
+		{
+			name:        "backup without volume handle falls back to the PV name",
+			existingPVC: pvc("default", "pv-other", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-other", "vol-1"),
+			backedUp:    BackedUpVolume{PVName: "pv-1"},
+			expectError: "is bound to PV pv-other, but was bound to PV pv-1 at backup time",
+		},
+		{
+			name:        "PVC not bound, check fails",
+			existingPVC: pvc("default", "", corev1api.ClaimPending),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
+			expectError: "is not bound (phase Pending)",
+		},
+		{
+			name:        "different volume in a different namespace, check passes",
+			existingPVC: pvc("mapped-ns", "pv-other", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-other", "vol-other"),
+			backedUp:    BackedUpVolume{PVName: "pv-1", VolumeHandle: "vol-1"},
+		},
+		{
+			name:        "backed-up volume unknown, check passes",
+			existingPVC: pvc("default", "pv-other", corev1api.ClaimBound),
+			existingPV:  csiPV("pv-other", "vol-other"),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckPVCBoundToBackedUpPV(tc.existingPVC, tc.backedUpPVName, "default")
+			err := CheckPVCBoundToBackedUpVolume(tc.existingPVC, tc.existingPV, tc.backedUp, "default")
 			if tc.expectError == "" {
 				require.NoError(t, err)
 				return
